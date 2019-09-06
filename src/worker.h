@@ -22,6 +22,7 @@
 
 #include "src/globals.h"
 #include "src/threads.h"
+#include "src/memory_info.h"
 #include "src/throttler.h"
 
 namespace cloud {
@@ -29,13 +30,13 @@ namespace profiler {
 
 class Worker {
  public:
-  Worker(jvmtiEnv *jvmti, ThreadTable *threads)
-      : jvmti_(jvmti), threads_(threads), stopping_() {}
+  Worker(jvmtiEnv *jvmti, ThreadTable *threads, MemoryInfo* memory_info)
+      : jvmti_(jvmti), threads_(threads), memory_info_(memory_info), stopping_() {}
 
   void Start(JNIEnv *jni);
   void Stop();
 
-  string CollectProfile(string type, int64_t duration_nanos, int64_t sampling_period_nanos);
+  string CollectProfile(JNIEnv *jnienv, string type, int64_t duration_nanos, int64_t sampling_period_nanos);
 
   static bool IsProfilingEnabled();
   static void EnableProfiling();
@@ -44,11 +45,12 @@ class Worker {
  private:
   static void ProfileThread(jvmtiEnv *jvmti_env, JNIEnv *jni_env, void *arg);
 
-  string CollectProfileLocked(google::javaprofiler::NativeProcessInfo* ni,
+  string CollectProfileLocked(google::javaprofiler::NativeProcessInfo* ni, JNIEnv *jnienv,
                               string type, int64_t duration_nanos, int64_t sampling_period_nanos);
 
   jvmtiEnv *jvmti_;
   ThreadTable *threads_;
+  MemoryInfo *memory_info_;
   std::mutex mutex_;  // Held by the worker thread while it's running.
   std::atomic<bool> stopping_;
   static std::atomic<bool> enabled_;

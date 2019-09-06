@@ -21,6 +21,7 @@
 
 #include <atomic>
 
+#include "src/memory_info.h"
 #include "src/threads.h"
 #include "third_party/javaprofiler/stacktraces.h"
 
@@ -41,9 +42,10 @@ class SignalHandler {
 
 class Profiler {
  public:
-  Profiler(jvmtiEnv *jvmti, ThreadTable *threads, int64_t duration_nanos,
-           int64_t period_nanos)
+  Profiler(jvmtiEnv *jvmti, ThreadTable *threads, MemoryInfo* memory_info,
+           int64_t duration_nanos, int64_t period_nanos)
       : threads_(threads),
+        memory_info_(memory_info),
         duration_nanos_(duration_nanos),
         period_nanos_(period_nanos),
         jvmti_(jvmti) {
@@ -57,6 +59,7 @@ class Profiler {
 
   // Serialize the collected traces into a compressed serialized profile.proto
   string SerializeProfile(
+      JNIEnv *jnienv,
       const google::javaprofiler::NativeProcessInfo &native_info);
 
   // Signal handler, which records the current stack trace into the profile.
@@ -74,6 +77,7 @@ class Profiler {
 
  protected:
   ThreadTable *threads_;
+  MemoryInfo *memory_info_;
   SignalHandler handler_;
   int64_t duration_nanos_;
   int64_t period_nanos_;
@@ -94,6 +98,9 @@ class Profiler {
 
   // Number of samples where the stack aggregation failed.
   static std::atomic<int> unknown_stack_count_;
+
+  // Memory info to use when profiling.
+  static MemoryInfo* global_memory_info_;
 
   DISALLOW_COPY_AND_ASSIGN(Profiler);
 };
@@ -123,8 +130,8 @@ class CPUProfiler : public Profiler {
 // SIGPROF to each thread in the thread table.
 class WallProfiler : public Profiler {
  public:
-  WallProfiler(jvmtiEnv *jvmti, ThreadTable *threads, int64_t duration_nanos,
-               int64_t period_nanos);
+  WallProfiler(jvmtiEnv *jvmti, ThreadTable *threads, MemoryInfo* memory_info,
+               int64_t duration_nanos, int64_t period_nanos);
 
   // Collect profiling data.
   bool Collect() override;

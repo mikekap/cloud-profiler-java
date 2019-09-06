@@ -62,7 +62,7 @@ void Worker::Stop() {
 
 namespace {
 
-string Collect(Profiler *p,
+string Collect(Profiler *p, JNIEnv *jnienv,
                google::javaprofiler::NativeProcessInfo *native_info) {
   const char *profile_type = p->ProfileType();
   if (!p->Collect()) {
@@ -70,7 +70,7 @@ string Collect(Profiler *p,
     return "";
   }
   native_info->Refresh();
-  return p->SerializeProfile(*native_info);
+  return p->SerializeProfile(jnienv, *native_info);
 }
 
 }  // namespace
@@ -116,6 +116,7 @@ void Worker::ProfileThread(jvmtiEnv *jvmti_env, JNIEnv *jni_env, void *arg) {
       continue;
     }
     string profile = w->CollectProfileLocked(&n,
+                                             jni_env,
                                              t->ProfileType(),
                                              t->DurationNanos(),
                                              t->ProfileType() == kTypeCPU ?
@@ -132,24 +133,24 @@ void Worker::ProfileThread(jvmtiEnv *jvmti_env, JNIEnv *jni_env, void *arg) {
   LOG(INFO) << "Exiting the profiling loop";
 }
 
-string Worker::CollectProfile(string pt, int64_t duration, int64_t sampling_period_nanos) {
+string Worker::CollectProfile(JNIEnv *jnienv, string pt, int64_t duration, int64_t sampling_period_nanos) {
   google::javaprofiler::NativeProcessInfo n(0);
 
   std::lock_guard<std::mutex> lock(mutex_);
-  return CollectProfileLocked(&n, pt, duration, sampling_period_nanos);
+  return CollectProfileLocked(&n, jnienv, pt, duration, sampling_period_nanos);
 }
 
-string Worker::CollectProfileLocked(google::javaprofiler::NativeProcessInfo *n,
+string Worker::CollectProfileLocked(google::javaprofiler::NativeProcessInfo *n, JNIEnv *jnienv,
                                     string pt, int64_t duration, int64_t sampling_period_nanos) {
   string profile;
   if (pt == kTypeCPU) {
-    CPUProfiler p(jvmti_, threads_, duration, sampling_period_nanos);
-    profile = Collect(&p, n);
+    CPUProfiler p(jvmti_, threads_, memory_info_, duration, sampling_period_nanos);
+    profile = Collect(&p, jnienv, n);
   } else if (pt == kTypeWall) {
     // Note that the requested sampling period for the wall profiling may be
     // increased if the number of live threads is too large.
-    WallProfiler p(jvmti_, threads_, duration, sampling_period_nanos);
-    profile = Collect(&p, n);
+    WallProfiler p(jvmti_, threads_, memory_info_, duration, sampling_period_nanos);
+    profile = Collect(&p, jnienv, n);
   } else {
     LOG(ERROR) << "Unknown profile type '" << pt << "', skipping the upload";
     return "";

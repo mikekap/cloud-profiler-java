@@ -131,13 +131,13 @@ class ProfileProtoBuilder {
   virtual std::unique_ptr<perftools::profiles::Profile> CreateProto() = 0;
 
   static std::unique_ptr<ProfileProtoBuilder> ForHeap(
-      jvmtiEnv *jvmti_env, int64 sampling_rate, ProfileFrameCache *cache);
+      JNIEnv* jnienv, jvmtiEnv *jvmti_env, int64 sampling_rate, ProfileFrameCache *cache);
 
   static std::unique_ptr<ProfileProtoBuilder> ForCpu(
-      jvmtiEnv *jvmti_env, int64 sampling_rate, ProfileFrameCache *cache);
+      JNIEnv* jnienv, jvmtiEnv *jvmti_env, int64 sampling_rate, ProfileFrameCache *cache);
 
   static std::unique_ptr<ProfileProtoBuilder> ForContention(
-      jvmtiEnv *jvmti_env, int64 sampling_rate, ProfileFrameCache *cache);
+      JNIEnv* jnienv, jvmtiEnv *jvmti_env, int64 sampling_rate, ProfileFrameCache *cache);
 
  protected:
   struct SampleType {

@@ -42,6 +42,8 @@ static Worker *worker;
 // Just make it a global singleton cleared up when the process exit.
 static ThreadTable *threads;
 
+static MemoryInfo *memory_info;
+
 static void JNICALL OnThreadStart(jvmtiEnv *jvmti_env, JNIEnv *jni_env,
                                   jthread thread) {
   IMPLICITLY_USE(jvmti_env);
@@ -73,15 +75,27 @@ static void JNICALL OnCompiledMethodLoad(jvmtiEnv *jvmti_env, jmethodID method,
                                          jint map_length,
                                          const jvmtiAddrLocationMap *map,
                                          const void *compile_info) {
-  // The callback is here to enable DebugNonSafepoints by default. See
+  // The callback is also here to enable DebugNonSafepoints by default. See
   // https://stackoverflow.com/questions/37298962/how-can-jvmti-agent-set-a-jvm-flag-on-startup.
   IMPLICITLY_USE(jvmti_env);
   IMPLICITLY_USE(method);
-  IMPLICITLY_USE(code_size);
-  IMPLICITLY_USE(code_addr);
   IMPLICITLY_USE(map_length);
   IMPLICITLY_USE(map);
   IMPLICITLY_USE(compile_info);
+
+  memory_info->AddExecutableMemoryRange((uintptr_t) code_addr, code_size, method);
+}
+
+static void JNICALL OnCompiledMethodUnload(jvmtiEnv *jvmti_env, jmethodID method,
+                                           const void *code_addr) {
+  memory_info->RemoveExecutableMemoryRange((uintptr_t) code_addr, method);
+}
+
+static void JNICALL OnDynamicCodeGenerated(jvmtiEnv* jvmti_env, const char* name,
+                                           const void* address, jint length) {
+  IMPLICITLY_USE(jvmti_env);
+  IMPLICITLY_USE(name);
+  memory_info->AddNativeMemoryRange((uintptr_t) address, length, name);
 }
 
 // Calls GetClassMethods on a given class to force the creation of
@@ -200,8 +214,11 @@ static bool RegisterJvmti(jvmtiEnv *jvmti) {
   };
 
   if (FLAGS_cprof_force_debug_non_safepoints) {
+    callbacks->DynamicCodeGenerated = &OnDynamicCodeGenerated;
     callbacks->CompiledMethodLoad = &OnCompiledMethodLoad;
+    callbacks->CompiledMethodUnload = &OnCompiledMethodUnload;
     events.push_back(JVMTI_EVENT_COMPILED_METHOD_LOAD);
+    events.push_back(JVMTI_EVENT_DYNAMIC_CODE_GENERATED);
   }
 
   JVMTI_ERROR_1(
@@ -270,6 +287,8 @@ jint JNICALL Agent_OnLoad(JavaVM *vm, char *options, void *reserved) {
   // race of getting thread events before the thread table is born.
   threads = new ThreadTable(FLAGS_cprof_cpu_use_per_thread_timers);
 
+  memory_info = new MemoryInfo();
+
   if (!RegisterJvmti(jvmti)) {
     LOG(ERROR) << "Failed to enable JVMTI events.  Continuing...";
     // We fail hard here because we may have failed in the middle of
@@ -286,7 +305,7 @@ jint JNICALL Agent_OnLoad(JavaVM *vm, char *options, void *reserved) {
     return 1;
   }
 
-  worker = new Worker(jvmti, threads);
+  worker = new Worker(jvmti, threads, memory_info);
   return 0;
 }
 
@@ -348,7 +367,7 @@ Java_com_google_cloud_profiler_Profiler_collect(
     return nullptr;
   }
 
-  string profile = cloud::profiler::worker->CollectProfile(pt, duration, sampling_period);
+  string profile = cloud::profiler::worker->CollectProfile(env, pt, duration, sampling_period);
 
   const auto output = env->NewByteArray(profile.length());
   env->SetByteArrayRegion(output, 0, profile.length(), reinterpret_cast<const jbyte *>(profile.data()));

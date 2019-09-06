@@ -37,6 +37,7 @@ jint GetLineNumber(jvmtiEnv *jvmti, jmethodID method, jlocation location);
 // When unknown, it fills the parameters with: UnknownFile, UnknownClass,
 // UnknownMethod, "", and -1.
 bool GetStackFrameElements(jvmtiEnv *jvmti,
+                           JNIEnv* jnienv,
                            const JVMPI_CallFrame &frame,
                            string *file_name, string *class_name,
                            string *method_name, string *signature,
@@ -48,7 +49,7 @@ bool GetStackFrameElements(jvmtiEnv *jvmti,
 // the frame method. Compared to the version above, which must calculate it.
 // When unknown, it fills the parameters with: UnknownFile, UnknownClass,
 // UnknownMethod, "", and -1.
-bool GetStackFrameElements(jvmtiEnv *jvmti, const JVMPI_CallFrame &frame,
+bool GetStackFrameElements(jvmtiEnv *jvmti, JNIEnv* jnienv, const JVMPI_CallFrame &frame,
                            jclass declaring_class, string *file_name,
                            string *class_name, string *method_name,
                            string *signature, int *line_number);

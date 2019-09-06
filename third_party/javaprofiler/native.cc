@@ -72,14 +72,16 @@ void NativeProcessInfo::Refresh() {
     if (info.is_submap) {
       depth++;
     } else {
-      char buf[1024] = {0};
-      errno = 0;
-      proc_regionfilename(getpid(), address, buf, sizeof(buf));
-      if (errno == 0 && buf[0] != 0) {
-        mappings_.emplace_back(
-            Mapping{address, address + size, string(buf)});
-      } else {
-        LOG(INFO) << "proc_regionfilename failed: " << errno << " on " << address << "-" << size;
+      if (info.protection & VM_PROT_EXECUTE) {
+        char buf[1024] = {0};
+        errno = 0;
+        proc_regionfilename(getpid(), address, buf, sizeof(buf));
+        if (errno == 0 && buf[0] != 0) {
+          mappings_.emplace_back(
+              Mapping{address, address + size, string(buf)});
+        } else {
+          LOG(INFO) << "proc_regionfilename failed: " << errno << " on " << address << "-" << size;
+        }
       }
 
       address += size;

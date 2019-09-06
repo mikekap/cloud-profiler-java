@@ -203,7 +203,7 @@ static void FillMethodSignatureAndLine(jvmtiEnv *jvmti,
   }
 }
 
-bool GetStackFrameElements(jvmtiEnv *jvmti, const JVMPI_CallFrame &frame,
+bool GetStackFrameElements(jvmtiEnv *jvmti, JNIEnv* jnienv, const JVMPI_CallFrame &frame,
                            string *file_name, string *class_name,
                            string *method_name, string *signature,
                            int *line_number) {
@@ -223,11 +223,13 @@ bool GetStackFrameElements(jvmtiEnv *jvmti, const JVMPI_CallFrame &frame,
     return true;
   }
 
-  return GetStackFrameElements(jvmti, frame, declaring_class, file_name,
-                               class_name, method_name, signature, line_number);
+  bool result = GetStackFrameElements(jvmti, jnienv, frame, declaring_class, file_name,
+                                      class_name, method_name, signature, line_number);
+  jnienv->DeleteLocalRef(declaring_class);
+  return result;
 }
 
-bool GetStackFrameElements(jvmtiEnv *jvmti, const JVMPI_CallFrame &frame,
+bool GetStackFrameElements(jvmtiEnv *jvmti, JNIEnv* jnienv, const JVMPI_CallFrame &frame,
                            jclass declaring_class, string *file_name,
                            string *class_name, string *method_name,
                            string *signature, int *line_number) {

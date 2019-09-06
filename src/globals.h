@@ -110,7 +110,7 @@ class JvmtiScopedPtr {
 
   T *Get() { return ref_; }
 
-  void AbandonBecauseOfError() { ref_ = NULL; }
+  void AbandonBecauseOfError() {  }
 
  private:
   jvmtiEnv *jvmti_;

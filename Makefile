@@ -18,6 +18,7 @@ UNAME := $(shell uname)
 # -fpermissive used to bypass <:: errors from gcc 4.7
 CFLAGS = \
 	-m64 \
+	-pthread \
 	-std=c++11 \
 	-fpermissive \
 	-fPIC \

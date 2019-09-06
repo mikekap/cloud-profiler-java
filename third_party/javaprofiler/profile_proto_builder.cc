@@ -335,21 +335,21 @@ double CalculateSamplingRatio(int64 rate, int64 count, int64 metric_value) {
 }
 
 std::unique_ptr<ProfileProtoBuilder> ProfileProtoBuilder::ForHeap(
-    jvmtiEnv *jvmti_env, int64 sampling_rate, ProfileFrameCache *cache) {
+    JNIEnv* jnienv, jvmtiEnv *jvmti_env, int64 sampling_rate, ProfileFrameCache *cache) {
   return std::unique_ptr<ProfileProtoBuilder>(new HeapProfileProtoBuilder(
-      jvmti_env, sampling_rate, cache));
+      jnienv, jvmti_env, sampling_rate, cache));
 }
 
 std::unique_ptr<ProfileProtoBuilder> ProfileProtoBuilder::ForCpu(
-    jvmtiEnv *jvmti_env, int64 sampling_rate, ProfileFrameCache *cache) {
+    JNIEnv* jnienv, jvmtiEnv *jvmti_env, int64 sampling_rate, ProfileFrameCache *cache) {
   return std::unique_ptr<ProfileProtoBuilder>(
-      new CpuProfileProtoBuilder(jvmti_env, sampling_rate, cache));
+      new CpuProfileProtoBuilder(jnienv, jvmti_env, sampling_rate, cache));
 }
 
 std::unique_ptr<ProfileProtoBuilder> ProfileProtoBuilder::ForContention(
-    jvmtiEnv *jvmti_env, int64 sampling_rate, ProfileFrameCache *cache) {
+    JNIEnv* jnienv, jvmtiEnv *jvmti_env, int64 sampling_rate, ProfileFrameCache *cache) {
   return std::unique_ptr<ProfileProtoBuilder>(
-      new ContentionProfileProtoBuilder(jvmti_env, sampling_rate, cache));
+      new ContentionProfileProtoBuilder(jnienv, jvmti_env, sampling_rate, cache));
 }
 
 }  // namespace javaprofiler

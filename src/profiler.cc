@@ -39,6 +39,7 @@ namespace profiler {
 
 google::javaprofiler::AsyncSafeTraceMultiset *Profiler::fixed_traces_ = nullptr;
 std::atomic<int> Profiler::unknown_stack_count_;
+MemoryInfo *Profiler::global_memory_info_;
 
 namespace {
 
@@ -54,12 +55,99 @@ class ErrnoRaii {
   DISALLOW_COPY_AND_ASSIGN(ErrnoRaii);
 };
 
+inline uintptr_t* ucontext_pc(void *context) {
+#ifdef __APPLE__
+    return (uintptr_t *)&static_cast<ucontext_t*>(context)->uc_mcontext->__ss.__rip;
+#else
+    return (uintptr_t *)&static_cast<ucontext_t*>(context)->uc_mcontext.gregs[REG_RIP];
+#endif
+}
+
+inline uintptr_t* ucontext_sp(void *context) {
+#ifdef __APPLE__
+    return (uintptr_t *)&static_cast<ucontext_t*>(context)->uc_mcontext->__ss.__rsp;
+#else
+    return (uintptr_t *)&static_cast<ucontext_t*>(context)->uc_mcontext.gregs[REG_RSP];
+#endif
+}
+
+inline uintptr_t* ucontext_fp(void *context) {
+#ifdef __APPLE__
+    return (uintptr_t *)&static_cast<ucontext_t*>(context)->uc_mcontext->__ss.__rbp;
+#else
+    return (uintptr_t *)&static_cast<ucontext_t*>(context)->uc_mcontext.gregs[REG_RBP];
+#endif
+}
+
+// The code below is loosely taken from async-profiler to pop the stack so ASGCT works when seeing an unknown java frame.
+static inline uintptr_t stackAt(void *context, int slot) {
+    return ((uintptr_t*)*ucontext_sp(context))[slot];
+}
+
+static inline bool withinCurrentStack(uintptr_t sp, void **current_stack_marker) {
+    // Check that value is not too far from stack pointer of current context
+    return (uintptr_t)sp - (uintptr_t) current_stack_marker <= 0xffff;
+}
+
+static inline bool isFramePrologueEpilogue(uintptr_t pc) {
+    if (pc & 0xfff) {
+        // Make sure we are not at the page boundary, so that reading [pc - 1] is safe
+        unsigned int opcode = *(unsigned int*)(pc - 1);
+        if (opcode == 0xec834855) {
+            // push rbp
+            // sub  rsp, $const
+            return true;
+        } else if (opcode == 0xec8b4855) {
+            // push rbp
+            // mov  rbp, rsp
+            return true;
+        }
+    }
+
+    if (*(unsigned char*)pc == 0x5d && *(unsigned short*)(pc + 1) == 0x0585) {
+        // pop  rbp
+        // test [polling_page], eax
+        return true;
+    }
+
+    return false;
+}
+
+bool popCurrentStack(void *context, void **current_stack_marker, bool trust_frame_pointer) {
+    if (!withinCurrentStack(*ucontext_sp(context), current_stack_marker)) {
+        return false;
+    }
+
+    if (trust_frame_pointer && withinCurrentStack(*ucontext_fp(context), current_stack_marker)) {
+        *ucontext_sp(context) = *ucontext_fp(context) + 16;
+        *ucontext_fp(context) = stackAt(context, -2);
+        *ucontext_pc(context) = stackAt(context, -1);
+    } else if (*ucontext_fp(context) == *ucontext_sp(context) ||
+               withinCurrentStack(stackAt(context, 0), current_stack_marker) ||
+               isFramePrologueEpilogue(*ucontext_pc(context))) {
+        *ucontext_fp(context) = stackAt(context, 0);
+        *ucontext_pc(context) = stackAt(context, 1);
+        *ucontext_sp(context) += 16;
+    } else {
+        *ucontext_pc(context) = stackAt(context, 0);
+        *ucontext_sp(context) += 8;
+    }
+    return true;
+}
+
+void restoreStack(void *context, uintptr_t pc, uintptr_t sp, uintptr_t fp) {
+    *ucontext_pc(context) = pc;
+    *ucontext_sp(context) = sp;
+    *ucontext_fp(context) = fp;
+}
+
 }  // namespace
 
 void Profiler::Handle(int signum, siginfo_t *info, void *context) {
   IMPLICITLY_USE(signum);
   IMPLICITLY_USE(info);
   ErrnoRaii err_storage;  // stores and resets errno
+  void* stack_marker;
 
   JVMPI_CallTrace trace;
   JVMPI_CallFrame frames[kMaxFramesToCapture];
@@ -76,6 +164,46 @@ void Profiler::Handle(int signum, siginfo_t *info, void *context) {
         google::javaprofiler::Asgct::GetAsgct();
     (*asgct)(&trace, kMaxFramesToCapture, context);
 
+    if (trace.num_frames == kUnknownJava) {
+      uintptr_t pc = *ucontext_pc(context),
+                sp = *ucontext_sp(context),
+                fp = *ucontext_fp(context);
+
+      // This works for all the wrong reasons - global_memory_info_ is not async signal safe.
+      // The callers of global_memory_info_ however are _never_ java threads - they are JVM compiler threads,
+      // so we don't need to worry about re-locking a mutex on the same thread.
+      MemoryInterval interval = global_memory_info_->GetMemoryInterval(pc);
+      bool is_entry_frame = false;
+      if (interval.start != 0) {
+        switch (interval.interval_type) {
+          case COMPILED_CODE:
+            trace.frames[0].lineno = 0;
+            trace.frames[0].method_id = interval.method_id;
+            break;
+
+          case NATIVE:
+            trace.frames[0].lineno = -202;
+            trace.frames[0].method_id = (jmethodID) (*interval.name == 0 ? "native" : interval.name);
+            is_entry_frame = !strcmp(interval.name, "call_stub");
+            break;
+        }
+        trace.frames++;
+      }
+
+      if (popCurrentStack(context, &stack_marker, is_entry_frame)) {
+        (*asgct)(&trace, kMaxFramesToCapture - 1, context);
+        restoreStack(context, pc, sp, fp);
+      }
+
+      if (interval.start != 0 && trace.num_frames > 0) {
+        trace.num_frames++;
+        trace.frames = frames;
+      }
+      if (trace.num_frames <= 0) {
+        trace.num_frames = kUnknownJava;
+      }
+    }
+
     if (trace.num_frames < 0) {
       // Did not get a valid java trace.
       trace.frames[0] =
@@ -88,7 +216,7 @@ void Profiler::Handle(int signum, siginfo_t *info, void *context) {
       return;
     }
 
-    if (frames[0].lineno >= 0) {
+    if (frames[0].lineno >= 0 || frames[0].lineno == -202) {
       // Leaf is a java frame, return java trace.
       if (!fixed_traces_->Add(attr, &trace)) {
         unknown_stack_count_++;
@@ -132,11 +260,7 @@ void Profiler::Handle(int signum, siginfo_t *info, void *context) {
     // counter in such case to provide at least some clue into where the time is
     // being spent. The alternative would be to mark such samples as erroneous
     // but it appears even having just the shared object name is more useful.
-#ifdef __APPLE__
-    uint64_t pc = static_cast<ucontext_t*>(context)->uc_mcontext->__ss.__rip;
-#else
-    uint64_t pc = static_cast<ucontext_t*>(context)->uc_mcontext.gregs[REG_RIP];
-#endif
+    uintptr_t pc = *ucontext_pc(context);
     trace.frames[0] =
         JVMPI_CallFrame{kNativeFrameLineNum, reinterpret_cast<jmethodID>(pc)};
     ++trace.num_frames;
@@ -187,6 +311,7 @@ void Profiler::Reset() {
     fixed_traces_->Reset();
   }
   unknown_stack_count_ = 0;
+  global_memory_info_ = memory_info_;
 
   if (FLAGS_cprof_record_native_stack) {
     // When native stack collection requested, gather a single backtrace before
@@ -202,9 +327,10 @@ void Profiler::Reset() {
 }
 
 string Profiler::SerializeProfile(
+    JNIEnv *jnienv,
     const google::javaprofiler::NativeProcessInfo &native_info) {
   return SerializeAndClearJavaCpuTraces(
-      jvmti_, native_info, ProfileType(), duration_nanos_, period_nanos_,
+      jnienv, jvmti_, native_info, ProfileType(), duration_nanos_, period_nanos_,
       &aggregated_traces_, unknown_stack_count_);
 }
 
@@ -236,7 +362,7 @@ bool CPUProfiler::Collect() {
   // Sleep until finish_line, but wakeup periodically to flush the
   // internal tables.
   while (!AlmostThere(finish_line, flush_interval)) {
-    clock->SleepFor(flush_interval);
+    clock->SleepUntil(TimeAdd(clock->Now(), flush_interval));
     Flush();
   }
   clock->SleepUntil(finish_line);
@@ -267,9 +393,9 @@ void CPUProfiler::Stop() {
   signal(SIGPROF, SIG_IGN);
 }
 
-WallProfiler::WallProfiler(jvmtiEnv *jvmti, ThreadTable *threads,
+WallProfiler::WallProfiler(jvmtiEnv *jvmti, ThreadTable *threads, MemoryInfo* memory_info,
                            int64_t duration_nanos, int64_t period_nanos)
-    : Profiler(jvmti, threads, duration_nanos,
+    : Profiler(jvmti, threads, memory_info, duration_nanos,
                EffectivePeriodNanos(period_nanos, threads->Size(),
                                     FLAGS_cprof_wall_max_threads_per_sec,
                                     duration_nanos)) {}
@@ -324,7 +450,7 @@ bool WallProfiler::Collect() {
       return false;  // Too many threads, abort
     }
     count += threads_->SignalAllExceptSelf(SIGPROF);
-    next = TimeAdd(next, profile_period);
+    next = TimeAdd(clock->Now(), profile_period);
   }
   // Delay to allow last signals to be processed.
   clock->SleepUntil(TimeAdd(next, profile_period));

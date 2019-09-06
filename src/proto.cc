@@ -32,9 +32,10 @@ namespace profiler {
 class ProfileProtoBuilder {
  public:
   ProfileProtoBuilder(
+      JNIEnv *jnienv,
       jvmtiEnv *jvmti,
       const google::javaprofiler::NativeProcessInfo &native_info)
-      : jvmti_(jvmti), native_info_(native_info) {
+      : jnienv_(jnienv), jvmti_(jvmti), native_info_(native_info) {
     for (const auto &it : google::javaprofiler::AttributeTable::GetStrings()) {
       builder_.StringId(it.c_str());
     }
@@ -67,6 +68,7 @@ class ProfileProtoBuilder {
                       const string &signature, const string &file_name,
                       int line_number);
 
+  JNIEnv *jnienv_;
   jvmtiEnv *jvmti_;
   int64_t total_count_ = 0;
   int64_t total_weight_ = 0;
@@ -81,9 +83,24 @@ class ProfileProtoBuilder {
       return static_cast<size_t>(hash);
     }
   };
+  class CallFrameHasher {
+   public:
+    size_t operator()(const JVMPI_CallFrame &f) const {
+      size_t hash = (size_t) f.method_id;
+      hash = hash + ((hash << 8) ^ (size_t) f.lineno);
+      return static_cast<size_t>(hash);
+    }
+  };
+  class CallFrameEq {
+   public:
+    bool operator()(const JVMPI_CallFrame &a, const JVMPI_CallFrame &b) const {
+      return a.method_id == b.method_id && a.lineno == b.lineno;
+    }
+  };
 
   std::unordered_map<Line, uint64_t, LineHasher> line_map_;
   std::unordered_map<uint64_t, uint64_t> address_location_;
+  std::unordered_map<JVMPI_CallFrame, uint64_t, CallFrameHasher, CallFrameEq> location_map_;
 
   const google::javaprofiler::NativeProcessInfo &native_info_;
   DISALLOW_COPY_AND_ASSIGN(ProfileProtoBuilder);
@@ -103,8 +120,9 @@ string CallTraceErrorToName(int64_t err) {
     case kNotWalkableFrameNotJava:
       return "[Unknown non-Java frame]";
     case kUnknownJava:
-    case kNotWalkableFrameJava:
       return "[Unknown Java frame]";
+    case kNotWalkableFrameJava:
+      return "[Unknown Not Walkable Java frame]";
     case kUnknownState:
       return "[Unknown state]";
     case kThreadExit:
@@ -131,23 +149,33 @@ int64_t ProfileProtoBuilder::TotalWeight() const { return total_weight_; }
 
 uint64_t ProfileProtoBuilder::LocationID(
     const google::javaprofiler::JVMPI_CallFrame &frame) {
+  uint64_t location = location_map_[frame];
+  if (location != 0) {
+    return location;
+  }
+
   if (frame.lineno == google::javaprofiler::kNativeFrameLineNum) {
-    return LocationID(reinterpret_cast<uint64_t>(frame.method_id));
+    return location_map_[frame] = LocationID(reinterpret_cast<uint64_t>(frame.method_id));
   }
 
   if (frame.lineno == google::javaprofiler::kCallTraceErrorLineNum) {
-    return LocationID(
+    return location_map_[frame] = LocationID(
         CallTraceErrorToName(reinterpret_cast<size_t>(frame.method_id)));
+  }
+
+  if (frame.lineno == -202) {
+    std::string value = reinterpret_cast<const char*>(frame.method_id);
+    return location_map_[frame] = LocationID(value);
   }
 
   string method_name, class_name, file_name, signature;
   int line_number = 0;
-  google::javaprofiler::GetStackFrameElements(jvmti_, frame, &file_name,
+  google::javaprofiler::GetStackFrameElements(jvmti_, jnienv_, frame, &file_name,
                                               &class_name, &method_name,
                                               &signature, &line_number);
   google::javaprofiler::FixMethodParameters(&signature);
 
-  return LocationID(class_name, method_name, signature, file_name, line_number);
+  return location_map_[frame] = LocationID(class_name, method_name, signature, file_name, line_number);
 }
 
 uint64_t ProfileProtoBuilder::LocationID(uint64_t address) {
@@ -228,6 +256,7 @@ void ProfileProtoBuilder::Populate(
 
   profile->set_duration_nanos(duration_ns);
 
+  LOG(INFO) << "Adding traces...";
   for (const auto &trace : traces) {
     int64_t count = trace.second;
     if (count != 0) {
@@ -239,6 +268,7 @@ void ProfileProtoBuilder::Populate(
     }
   }
 
+  LOG(INFO) << "Adding mappings...";
   for (const auto &mapping : native_info_.Mappings()) {
     perftools::profiles::Mapping *m = profile->add_mapping();
     m->set_id(profile->mapping_size());
@@ -271,10 +301,11 @@ void ProfileProtoBuilder::AddSample(const std::vector<uint64_t> &locations,
 }
 
 string SerializeAndClearJavaCpuTraces(
-    jvmtiEnv *jvmti, const google::javaprofiler::NativeProcessInfo &native_info,
+    JNIEnv *jnienv, jvmtiEnv *jvmti, const google::javaprofiler::NativeProcessInfo &native_info,
     const char *profile_type, int64_t duration_ns, int64_t period_ns,
     google::javaprofiler::TraceMultiset *traces, int64_t unknown_count) {
-  ProfileProtoBuilder b(jvmti, native_info);
+  LOG(INFO) << "Serializing a profile";
+  ProfileProtoBuilder b(jnienv, jvmti, native_info);
   b.Populate(profile_type, *traces, duration_ns, period_ns);
   b.AddArtificialSample("[Unknown]", unknown_count, unknown_count * period_ns);
   LOG(INFO) << "Collected a profile: total count=" << b.TotalCount()
